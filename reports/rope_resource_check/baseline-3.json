@@ -4,7 +4,7 @@
   "nll_nats": 1648042.5895596934,
   "targets": 376599,
   "utf8_bytes": 1148007,
-  "seconds": 4.249278583098203,
+  "seconds": 3.9803317500045523,
   "protocol": "7506-mp1-wt2-v2",
   "split": "validation",
   "precision": "fp32",

@@ -1,124 +1,99 @@
-# SwiGLU, Dropout, and Model Capacity in a Small Language Model
+# Architecture, Regularization, and Capacity in a Small Language Model
 
-**DASE7506 · MP1 · English report draft · 30 September 2026**  
+DASE7506 MP1 · English report · 30 September 2026  
 Name and student ID: [TO COMPLETE]  
-Status: evidence-based draft, not a complete submission. No full-test result is recorded for the width-192 model. Resource verification, the final submission version, and artifact links remain to be confirmed. This Markdown document is not paginated; the exported report must be checked against the ten-page limit, including references.
+Report candidate: RoPE + GELU + Dropout, width 256, six layers, 6000 steps. Immutable code and checkpoint links: [TO COMPLETE]. Check the exported document against the ten-page limit; this Markdown file is not paginated.
 
 ## Abstract
 
-This project trains small autoregressive language models from random initialization on the supplied WikiText-2 benchmark with a fixed BPE-2048 tokenizer. It investigates gated feed-forward layers, dropout, training budget, and model capacity. With the same 9,830,400 processed training targets and seed 17, replacing GELU with an approximately parameter-matched SwiGLU layer reduces validation bits per byte (BPB) from 2.07109 to 2.00788. Adding dropout alone at 0.05 or 0.10 does not improve the baseline. A width-128 SwiGLU model with dropout 0.05 reaches 1.73074 validation BPB after 6000 updates. Increasing width to 192 at the same training-target budget reduces this to 1.66915. These gains cannot all be attributed to a single mechanism, and validation results are not test results. The recorded full-test BPB of the earlier width-128, 2400-step combined model is 1.86283. All principal comparisons use one seed and do not establish statistical significance.
+Starting from the supplied GPT baseline, this project studies dropout, SwiGLU, training budget, width, depth, and rotary position embeddings. At 1200 updates, an approximately parameter-matched SwiGLU model reduces validation BPB from 2.07109 to 2.00788. However, at width 192, six layers, and 6000 updates, GELU with dropout achieves 1.60688, outperforming SwiGLU with dropout at 1.63767. The benefits therefore depend on the experimental setting. A subsequent width-256 combination of RoPE, GELU, and dropout at multiple locations achieves CPU FP32 validation BPB of 1.52770 and full-test BPB of 1.54400. Several factors change in this combination, so its entire gain cannot be attributed to RoPE. The report presents successful and unsuccessful experiments, matched comparisons, ablations, costs, and limitations.
 
-## 1. Task and Baseline
+## 1. Task, Data, and Baseline
 
-The task is to reduce full-test BPB while preserving the supplied data, tokenizer, and evaluator. Protocol `7506-mp1-wt2-v2` fixes the vocabulary at 2048 and uses independent causal windows of 256 targets without temporary state crossing windows. Every target except the first token of each split is scored, including the final short window. The metric is:
+The task uses protocol `7506-mp1-wt2-v2`, the supplied WikiText-2 splits, and the fixed BPE-2048 tokenizer. Prediction is causal, with independent windows of 256 targets and no text-dependent state carried across windows. Validation contains 376,599 scored targets and 1,148,007 UTF-8 bytes; test contains 428,405 targets and 1,292,013 bytes. Data and the evaluation protocol remain fixed.
 
-`BPB = sum[-ln p(x[t+1] | x[<=t])] / (ln(2) × raw UTF-8 bytes in the split)`.
+BPB is `sum[-ln p(actual next token | observed prefix)] / [ln(2) × raw UTF-8 bytes]`. Lower is better. It is neither accuracy nor directly comparable to perplexities using other tokenization protocols.
 
-Validation contains 376,599 scored targets and 1,148,007 bytes; test contains 428,405 targets and 1,292,013 bytes. Validation is intended for development and selection; test is intended for evaluating the frozen method. Dataset attribution is provided in the supplied README. All four current data/tokenizer hashes match the supplied data manifest.
+The supplied baseline has four layers, width 128, four attention heads, and 1,088,256 parameters. It uses learned absolute positions, pre-layer normalization, causal attention, GELU feed-forward layers, residual connections, and tied embeddings. This project implements and evaluates known techniques using the course code rather than claiming a new algorithm.
 
-The baseline is a four-layer, four-head GPT with width 128 and 1,088,256 parameters. It uses learned absolute positions, pre-layer normalization, causal attention, residual connections, and tied input/output embedding weights. These mechanisms are retained; the experiments change the feed-forward module, dropout, and width as specified.
+## 2. Methods
 
-## 2. Methods and Hypotheses
+**Feed-forward dropout.** Dropout is inserted after the feed-forward output, before residual addition. Initial experiments use probabilities 0.10 and 0.05. The intended benefit is reduced feature co-adaptation, but effectiveness is assessed from validation results rather than assumed.
 
-### 2.1 Approximately Parameter-Matched SwiGLU
+**SwiGLU.** The baseline feed-forward network is replaced by `down(SiLU(gate(x)) × value(x))`. Its intermediate width is `round(8d/3)`, limiting the extra parameters introduced by three affine projections. At width 128 the total parameter difference from the baseline is only 168, enabling an approximately parameter-matched comparison.
 
-The baseline feed-forward network is `Linear(d,4d) → GELU → Linear(4d,d)`. The replacement uses three affine projections:
+**Budget and capacity.** Experiments compare 2400 versus 6000 steps, widths 128 versus 192, and four versus six layers. Matching processed targets does not match computation. Also, changing the total step count changes the cosine learning-rate trajectory, not merely training duration.
 
-`FFN(x) = down(SiLU(gate(x)) ⊙ value(x))`.
+**RoPE combination.** The latest candidate removes learned absolute position embeddings and rotates Q and K inside each attention head while leaving V unchanged. Causal masking is retained, and each independent window starts positions at zero. The implementation uses GELU and dropout on embeddings, attention weights, attention outputs, and feed-forward outputs. Width also increases to 256 and dropout to 0.10. This is a combined architecture/capacity/regularization experiment, not an isolated RoPE ablation. The implementation inherits the course GPT interface and incorporates a supplied RoPE example; code reuse should also be acknowledged in the README.
 
-Here ⊙ denotes elementwise multiplication, and all three projections include biases. An input-dependent gate modulates the content branch. This is an implementation and evaluation of the GLU family studied by Shazeer [1], not a claim of a novel architecture. The hypothesis is that multiplicative gating improves feature transformation at a similar parameter budget.
+## 3. Experimental Setup
 
-The intermediate width is `round(8d/3)`, giving 341 for d=128 and 512 for d=192. At width 128, the baseline and SwiGLU models contain 1,088,256 and 1,088,424 parameters respectively, a difference of only 168. New linear layers use the baseline initialization: normal weights with standard deviation 0.02 and zero biases.
+All main runs use seed 17, batch size 32, and context 256. Runs of 1200, 2400, and 6000 updates process 9,830,400, 19,660,800, and 49,152,000 training targets respectively, including repeated sampling. The trainer starts from random initialization and has no checkpoint-resume path.
 
-### 2.2 Feed-Forward Output Dropout
+AdamW uses peak learning rate 0.001, weight decay 0.1, 100-step warmup and the supplied cosine schedule, with gradient clipping at 1.0. Earlier runs use CPU FP32. The RoPE training log records an NVIDIA A100-SXM4-40GB with BF16 training; its validation function uses FP32, and CPU FP32 evaluation was performed separately. Training times across devices or different concurrent workloads do not establish architectural speedups. Historical CPU models and concurrency were not fully recorded.
 
-Dropout is applied after the feed-forward output and before residual addition: `x + Dropout(FFN(LayerNorm(x)))`. It is disabled during evaluation. The motivation is to reduce feature co-adaptation [2]. Baseline experiments use p=0.10 and p=0.05; later combined models use p=0.05. The baseline experiments do not support a benefit, and its separate contribution within the combined model remains unisolated.
+The trainer saves the final step rather than the validation-best checkpoint. All principal experiments use one seed and do not establish statistical significance. The table comes from surviving metrics files; exact paths and evidence are provided alongside this report.
 
-### 2.3 Capacity and Training Budget
+## 4. Results
 
-Width is increased from 128 to 192 with depth and head count unchanged, raising the parameter count to 2,223,232. Scaling research [3] motivates examining capacity but does not predict the gain in this small-data setting or identify 192 as an optimal width. Training-budget comparisons use 2400 and 6000 updates. Since the cosine schedule depends on the total number of steps, these runs also follow different learning-rate trajectories; the comparison is not simply a continuation of the same earlier checkpoint.
-
-## 3. Experimental Setup and Provenance
-
-All recorded main runs use seed 17, batch size 32, 256 targets per sequence, four CPU threads, FP32, and PyTorch 2.7.1. Training uses AdamW with peak learning rate 0.001, weight decay 0.1, a 100-step linear warmup, the supplied cosine factor with a minimum factor approximately 0.1, and gradient clipping at norm 1.0. Training windows are sampled randomly from the supplied training-token sequence and may overlap or repeat.
-
-Processed targets equal `steps × 32 × 256`; they are not a count of unique tokens. The trainer contains no checkpoint-resume path, so each recorded run starts from random initialization. At report preparation, the environment is macOS 27.0/arm64 with Python 3.12.9. Historical logs identify the device only as CPU and do not record the chip model; the current environment is not a complete historical hardware record.
-
-Evidence comes from `code/runs/*/metrics.json` and corresponding evaluation JSON files. Extracted records, curves, and hashes are included in `experiment_evidence.json`. Repository HEAD at draft preparation is `1235d3acae75bf19ada33b701446ea4a399a037d`; this does not establish that every training run used that commit and is not a designation of the final submission commit.
-
-## 4. Results and Ablations
-
-| Method | Width | Steps | Parameters | Validation BPB | Train (s) |
-|---|---:|---:|---:|---:|---:|
-| Baseline GELU | 128 | 1200 | 1,088,256 | 2.07109 | 209.56 |
-| GELU + dropout 0.10 | 128 | 1200 | 1,088,256 | 2.08875 | 218.09 |
-| GELU + dropout 0.05 | 128 | 1200 | 1,088,256 | 2.08191 | 232.16 |
-| SwiGLU | 128 | 1200 | 1,088,424 | 2.00788 | 187.87 |
-| SwiGLU + dropout | 128 | 2400 | 1,088,424 | 1.83138 | 474.00 |
-| SwiGLU + dropout | 128 | 6000 | 1,088,424 | 1.73074 | 1255.36 |
-| SwiGLU + dropout | 192 | 6000 | 2,223,232 | 1.66915 | 1644.08 |
+| ID | Model | Width / depth | Dropout | Steps | Parameters | Val BPB | Train s | Device / precision |
+|---|---|---|---:|---:|---:|---:|---:|---|
+| E1 | GELU | 128 / 4 | 0.00 | 1200 | 1,088,256 | 2.07109 | 209.56 | CPU / FP32 |
+| E2 | GELU | 128 / 4 | 0.10 | 1200 | 1,088,256 | 2.08875 | 218.09 | CPU / FP32 |
+| E3 | GELU | 128 / 4 | 0.05 | 1200 | 1,088,256 | 2.08191 | 232.16 | CPU / FP32 |
+| E4 | SwiGLU | 128 / 4 | 0.00 | 1200 | 1,088,424 | 2.00788 | 187.87 | CPU / FP32 |
+| E5 | SwiGLU | 128 / 4 | 0.05 | 2400 | 1,088,424 | 1.83138 | 474.00 | CPU / FP32 |
+| E6 | SwiGLU | 128 / 4 | 0.05 | 6000 | 1,088,424 | 1.73074 | 1255.36 | CPU / FP32 |
+| E7 | SwiGLU | 192 / 4 | 0.05 | 6000 | 2,223,232 | 1.66915 | 1644.08 | CPU / FP32 |
+| E8 | SwiGLU | 192 / 6 | 0.05 | 6000 | 3,113,472 | 1.63767 | 2361.73 | CPU / FP32 |
+| E9 | SwiGLU | 192 / 6 | 0.00 | 6000 | 3,113,472 | 1.66182 | 2411.34 | CPU / FP32 |
+| E10 | GELU | 192 / 6 | 0.05 | 6000 | 3,111,936 | 1.60688 | 2611.32 | CPU / FP32 |
+| E11 | RoPE + GELU | 256 / 6 | 0.10 | 6000 | 5,263,360 | 1.52770 | 158.95 | A100 / BF16 |
 
 
-Training time is the logged `train_seconds`, excluding the intermediate validation time accounted for by the trainer. It is not CPU scoring time. Exact run IDs and values are provided in `experiment_tables.md`.
+## 5. Comparisons and Ablations
 
-### 4.1 Mechanism Comparisons at Matched Training Volume
+**Initial comparisons (E1–E4).** With 1200 updates, SwiGLU lowers validation BPB by 0.06320 relative to GELU. Both standalone dropout settings worsen the baseline. SwiGLU therefore helps in this small-model, short-budget setting, while dropout does not show a benefit. A common seed does not make parameter initialization identical across architectures.
 
-At 1200 steps, SwiGLU reduces validation BPB by 0.06320, approximately 3.05%, relative to the baseline. Both runs process the same number of targets and have nearly equal parameter counts. This provides a feed-forward mechanism comparison and ablation: removing SwiGLU and restoring GELU gives the baseline configuration. However, replacing modules consumes additional random numbers, so a common seed does not make this a weight-by-weight matched experiment. Multiple seeds are needed to assess robustness.
+**Budget and capacity (E5–E8).** Extending the combined width-128 recipe from 2400 to 6000 updates lowers BPB from 1.83138 to 1.73074. At 6000 updates, increasing width to 192 lowers it to 1.66915; increasing depth to six lowers it further to 1.63767. The latter two comparisons isolate width and depth within their respective settings, with increased computational cost.
 
-Dropout 0.10 and 0.05 increase baseline validation BPB by approximately 0.01766 and 0.01082 respectively. Neither helps under this 1200-step recipe. One possible explanation is that regularization slows fitting under a limited budget; these experiments do not establish that explanation.
+**Six-layer ablations (E8–E10).** Replacing SwiGLU with GELU while retaining dropout improves BPB from 1.63767 to 1.60688, a decrease of 0.03080. Removing dropout while retaining SwiGLU worsens it to 1.66182, an increase of 0.02415. Thus, SwiGLU is not universally superior, while dropout helps the six-layer SwiGLU configuration. These comparisons match training-target counts and provide mechanism ablations. Pure SwiGLU reached 1.66141 at step 5500, but those weights were not saved; that score must not be assigned to the available final checkpoint.
 
-### 4.2 Training Budget and Capacity
+**RoPE combination (E11).** CPU FP32 validation BPB is 1.52769829. This is below E10, but width, dropout placement and probability, training hardware, and training precision also change. A width-256 absolute-position control with identical regularization and training conditions is missing. RoPE's independent contribution is therefore unisolated, and the earlier SwiGLU ablation cannot substitute for this control. If RoPE is presented as the sole key mechanism, this remains an experimental gap.
 
-For the width-128 combined model, increasing the budget from 2400 to 6000 steps reduces validation BPB from 1.83138 to 1.73074, a decrease of approximately 0.10064. The 6000-step validation curve declines from 1.84721 at step 2000 to 1.75890 at step 4000, 1.74111 at step 5000, and 1.73074 at the end. Late gains diminish, but no validation reversal is recorded.
+## 6. Full-Test Results and Resource Checks
 
-At the same 49,152,000 processed targets, width 192 improves BPB by 0.06158, approximately 3.56%, over width 128. Recorded training time increases from 1255.36 to 1644.08 seconds, approximately 31.0%, while parameters increase by approximately 104.3%. This is a capacity-quality trade-off, not an isolated SwiGLU gain or a compute-matched comparison.
-
-The best validation score is approximately 19.41% below the initial baseline. That overall difference combines changes to architecture, regularization, training budget, and capacity and cannot be attributed to one component.
-
-### 4.3 Recorded Full-Test Results and Version Boundaries
-
-| Model | Full-test BPB | Scoring time (s) |
+| Model | Full-test CPU FP32 BPB | Single scoring time (s) |
 |---|---:|---:|
-| Baseline, width 128, 1200 steps | 2.10127 | 4.6794 |
-| SwiGLU + dropout, width 128, 2400 steps | 1.86283 | 4.5065 |
-| SwiGLU + dropout, width 192, 6000 steps | Not recorded | Not recorded |
+| Initial baseline | 2.10127 | 4.6794 |
+| Width-128, 2400-step SwiGLU + dropout | 1.86283 | 4.5065 |
+| Width-256, six-layer RoPE combination | 1.54400 | 16.2610 |
 
-The earlier 2400-step model was tested before subsequent 6000-step and width-expansion experiments. This chronology is disclosed rather than claiming that all development preceded the first test evaluation. Subsequent analysis here uses validation records, but the chronology still needs to be explained to the instructor under the requirement to freeze the method before testing; acceptance is for the instructor to determine. The score 1.86283 belongs only to the 2400-step checkpoint and cannot be assigned to the wider model. No recorded result establishes BPB below 1.5.
+The latest exact test score is **1.543998614826954**, which is not below 1.5. Each score belongs to its matching checkpoint. An earlier model was tested before later development continued; the report cannot claim that all development preceded the first test evaluation. This chronology should be disclosed to the instructor, who determines compliance with the freezing requirement.
 
-## 5. Cost, Resources, and Reproduction
+Three fresh-process validation measurements per model, on the same CPU with FP32 and four threads, give median scoring times of 10.808 seconds for RoPE and 4.250 seconds for the baseline: a ratio of 2.543, below the 5x limit. Maximum RoPE process peak RSS is 1.735 GiB, below 4 GiB. The checkpoint is 20.103 MiB, but the complete final inference bundle has not been inventoried. RSS includes loading and scoring; scoring time excludes loading. A full-test scoring time of 16.261 seconds is recorded, but a contemporaneous repeated baseline comparison and full-test peak RAM are missing. Validation prechecks are not full-test resource certification.
 
-The seven main training runs and one ten-step smoke run process 157,368,320 targets in total. Logged training time sums to 4222.98 seconds (70.38 minutes), and training-process time sums to 4502.94 seconds (75.05 minutes). These totals cover surviving logs only and exclude independent evaluation, failed or deleted runs, installation, and human development time.
+All five original small-model contract tests pass with RoPE selected. For trained weights, causality, state reset, gradients, and separately checked batch independence pass. The normalization residual is approximately 1.62e-6, exceeding the unit-test tolerance of 1e-6 but below the evaluator threshold of 1e-3. Scoring succeeds; this is not described as passing every strict trained-model test.
 
-The width-192 checkpoint occupies 8,913,653 bytes (8.50 MiB), below 64 MiB, but this is not an inventory of the complete uncompressed inference bundle. The earlier 2400-step model's recorded scoring time is about 0.963 times the baseline's, based on single historical measurements; this does not establish the wider model's scoring ratio. Peak CPU RAM has not been measured. CUDA memory fields that are zero on CPU must not be interpreted as zero RAM usage. Consequently, full resource compliance of the best-validation candidate remains unverified.
+## 7. Cost and Reproduction
 
-Install Python 3.12, PyTorch 2.7.1, and the remaining requirements as specified in the supplied README. Run commands from `code/`, using a fresh training output directory:
+Surviving records cover eleven main runs and one ten-step smoke run, totaling 353,976,320 processed targets. Logged CPU training totals 11607.37 seconds and A100 training 158.95 seconds. These are reported separately, not as a hardware-independent compute budget. Totals exclude unsaved, failed or deleted runs, independent scoring, and human development time.
 
-```bash
-python train.py --implementation student --config configs/swiglu_dropout_width192.json --device cpu --threads 4 --seed 17 --steps 6000 --eval-every 500 --run-dir runs/reproduce-width192
-python evaluate.py --checkpoint runs/swiglu-dropout-width192-6000/checkpoint.pt --device cpu --precision fp32 --threads 4 --split validation
-```
-
-Reproduce the existing 2400-step test result without retraining:
+Learning uses the supplied training text; development comparisons are recorded on validation. Existing model branches are preserved, with RoPE selected by `variant="rope"`. The RoPE checkpoint SHA-256 is `49d0141168eb606d6be697087aa85aef6c3038d3a8b52a27fb6994fe726103f4`, matching the current weights and test record. Install dependencies according to the course README. Evaluation requires no retraining:
 
 ```bash
-python evaluate.py --checkpoint runs/swiglu-dropout-2400/checkpoint.pt --device cpu --precision fp32 --threads 4 --split test
+# Run from code/ after installing the documented dependencies.
+python train.py --implementation student --config configs/rope_width256_depth6.json --device cuda --precision bf16 --threads 4 --seed 17 --steps 6000 --eval-every 500 --run-dir runs/reproduce-rope
+python evaluate.py --checkpoint runs/rope-width256-depth6-6000/checkpoint.pt --device cpu --precision fp32 --threads 4 --split test
 ```
 
-The 2400-step checkpoint SHA-256 is `3468a9a6b28053ad13a9e746822fc9036ff7c6896ec15e6e206a8ea09df62895`. The width-192 checkpoint SHA-256 is `9ef14cf732103589f05c96f0bcffd1e5fd23eccbb6b3a9b4d1d362087d959757`. Both match the current files. The downloadable bundle must include the matching `student.py`, `model.py`, configuration, and all other required scoring files.
 
-## 6. Limitations and Conclusions
+The training command restates the main logged settings, not a guarantee of bitwise reproducibility across devices. Provide immutable code and matching downloadable weights, with paths and configuration consistent with the score.
 
-These single-seed experiments support approximately parameter-matched SwiGLU and show additional validation gains from a larger training budget and width. They do not support a standalone dropout benefit. A 6000-step GELU control at the same width and a same-budget pure-SwiGLU control are missing, preventing separation of every component's contribution in the final combination. Single timing observations do not establish reliable acceleration, and single-seed results do not establish statistical significance.
+## 8. Conclusions, Personal Work, and AI Assistance
 
-Before submission, complete the author information, identify the frozen submission checkpoint, supply its evaluation and resource evidence, provide immutable code and checkpoint links, and export a report of at most ten pages. Width 192 is the current best-validation candidate, not automatically the model already submitted.
+The principal finding is that improvements depend on scale and training conditions. The small-model SwiGLU benefit does not persist in the larger comparison, and dropout's effect also changes. More training and capacity improve validation quality at additional cost. The RoPE combination achieves the best recorded validation score and 1.54400 full-test BPB, but its independent positional-encoding benefit remains unresolved. Priorities for further evidence are a matched RoPE control, multiple seeds, and full-test resource verification.
 
-## 7. AI Assistance and Reuse Disclosure
+**Personal contribution.** I read and progressively worked through the supplied GPT and training code, edited student.py and configuration files with AI guidance, executed multiple training experiments, inspected logs, and compared settings. I proposed exploring additional blocks, discussed integrating RoPE through GPT inheritance, and carried out GELU, SwiGLU, and dropout comparisons. I participated in choosing and implementing the experimental progression rather than simply submitting a ready-made result. My analysis must follow the measurements, including accepting that GELU outperforms SwiGLU in the larger setting and distinguishing validation scores, test scores, and resource costs.
 
-The project reuses the supplied course GPT, training framework, and evaluation protocol. OpenAI Codex/ChatGPT assisted with interpreting the assignment, suggesting experiments, providing SwiGLU/dropout code examples, diagnosing errors, aggregating logs, executing one test evaluation of the 2400-step model, and drafting the Chinese and English reports. Early assistant-written modifications were reverted on request; subsequent code was edited by the student using the examples. The student must review the implementation and text and is responsible for the final submission. The work should not be described as entirely unaided. This disclosure must also be included in the repository README.
-
-## References
-
-[1] Shazeer, N. (2020). *GLU Variants Improve Transformer*. https://arxiv.org/abs/2002.05202  
-[2] Srivastava, N., et al. (2014). *Dropout: A Simple Way to Prevent Neural Networks from Overfitting*. JMLR, 15, 1929–1958. https://jmlr.org/papers/v15/srivastava14a.html  
-[3] Kaplan, J., et al. (2020). *Scaling Laws for Neural Language Models*. https://arxiv.org/abs/2001.08361  
-[4] DASE7506 MP1 supplied `GUIDE.md`, `code/README.md`, model and scoring code. Local assignment specification and experimental artifacts.
+**AI assistance.** OpenAI Codex/ChatGPT explained concepts and assignment rules, suggested experiments, supplied some implementation examples, diagnosed errors, integrated the provided RoPE example into student.py, ran some interface and resource checks and one earlier test evaluation, and aggregated logs and drafted the bilingual reports. The baseline is course-provided and RoPE also draws on the supplied example file. This assistance does not replace my experimental work, understanding, or responsibility for the final submission. I must review the report against my actual work and retain the substantive AI and code-reuse disclosure in the README.
