@@ -1,0 +1,5 @@
+{
+  "peak_rss_bytes": 1811316736,
+  "platform": "macOS-27.0-arm64-arm-64bit",
+  "measurement": "getrusage(RUSAGE_SELF).ru_maxrss; entire evaluator process including loading"
+}
