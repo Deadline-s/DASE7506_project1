@@ -1,8 +1,8 @@
-# Architecture, Regularization, and Capacity in a Small Language Model
+# DASE7501-mp1
 
-DASE7506 MP1 · English report · 30 September 2026  
-Name and student ID: [TO COMPLETE]  
-Report candidate: RoPE + GELU + Dropout, width 256, six layers, 6000 steps. Immutable code and checkpoint links: [TO COMPLETE]. Check the exported document against the ten-page limit; this Markdown file is not paginated.
+DASE7501-mp1 · English report · 30 September 2026  
+Name: Haopeng Li (李昊澎)  
+Student ID: 3036803563  
 
 ## Abstract
 
@@ -16,7 +16,29 @@ BPB is `sum[-ln p(actual next token | observed prefix)] / [ln(2) × raw UTF-8 by
 
 The supplied baseline has four layers, width 128, four attention heads, and 1,088,256 parameters. It uses learned absolute positions, pre-layer normalization, causal attention, GELU feed-forward layers, residual connections, and tied embeddings. This project implements and evaluates known techniques using the course code rather than claiming a new algorithm.
 
-## 2. Methods
+## 2. Final Model Design
+
+### 2.1 Architecture Overview
+
+| Component | Final RoPE configuration |
+|---|---|
+| Transformer depth / width | 6 / 256 |
+| Attention heads / head dimension | 4 / 64 |
+| Attention | Standard causal multi-head attention; full-head RoPE on Q and K |
+| Feed-forward network | GELU, 256 → 1024 → 256, with biases |
+| Normalization | Pre-LayerNorm and final LayerNorm |
+| Positions | Fixed-frequency RoPE, base=10000; no learned position table |
+| Dropout | 0.10 on embeddings, attention weights, and both residual branches |
+| Embedding / output head | 2048 × 256, tied weights |
+| Parameters | 5,263,360 |
+| Training budget | 6000 steps; 49,152,000 processed targets |
+
+The data flow is token IDs → embedding and dropout → six causal RoPE blocks → LayerNorm → tied vocabulary projection. Each block applies LayerNorm, Q/K rotation, causal attention and a residual addition, followed by LayerNorm, a GELU feed-forward network and a second residual addition. The evaluation interface converts logits to FP32 natural-log probabilities.
+
+This model uses full-head RoPE and ordinary multi-head attention. It does not use GQA, QK normalization, learnable temperature, output gating, RMSNorm, or EMA. Those components occur in the reference repository but are not completed methods in this project.
+
+### 2.2 From Baseline to Final Recipe
+
 
 **Feed-forward dropout.** Dropout is inserted after the feed-forward output, before residual addition. Initial experiments use probabilities 0.10 and 0.05. The intended benefit is reduced feature co-adaptation, but effectiveness is assessed from validation results rather than assumed.
 
@@ -34,7 +56,21 @@ AdamW uses peak learning rate 0.001, weight decay 0.1, 100-step warmup and the s
 
 The trainer saves the final step rather than the validation-best checkpoint. All principal experiments use one seed and do not establish statistical significance. The table comes from surviving metrics files; exact paths and evidence are provided alongside this report.
 
-## 4. Results
+## 4. Headline Results and Experimental Progression
+
+### 4.1 Headline Results
+
+| Metric | Initial baseline | Final RoPE combination |
+|---|---:|---:|
+| Full-test CPU FP32 BPB | 2.10127 | **1.54400** |
+| Validation BPB, CPU FP32 | 2.07109 | **1.52770** |
+| Parameters | 1,088,256 | 5,263,360 |
+| Training steps | 1200 | 6000 |
+
+The full-test BPB reduction is approximately **26.52%** relative to the recorded initial baseline. This is a whole-recipe improvement: training volume increases fivefold, and capacity, positions, and regularization also change. It is not an estimate of RoPE's isolated contribution. The result remains above the original target of 1.5.
+
+### 4.2 Complete Validation Results
+
 
 | ID | Model | Width / depth | Dropout | Steps | Parameters | Val BPB | Train s | Device / precision |
 |---|---|---|---:|---:|---:|---:|---:|---|
@@ -51,7 +87,28 @@ The trainer saves the final step rather than the validation-best checkpoint. All
 | E11 | RoPE + GELU | 256 / 6 | 0.10 | 6000 | 5,263,360 | 1.52770 | 158.95 | A100 / BF16 |
 
 
-## 5. Comparisons and Ablations
+### 4.3 Training Dynamics
+
+| Step | Six-layer SwiGLU + dropout, width 192 | Six-layer GELU + dropout, width 192 |
+|---|---:|---:|
+| 4000 | 1.66502 | 1.63785 |
+| 4500 | 1.65261 | 1.62524 |
+| 5000 | 1.64538 | 1.61609 |
+| 5500 | 1.64046 | 1.60820 |
+| 6000 | 1.63767 | 1.60688 |
+
+Both validation curves continue to improve late in training, with GELU ahead at each listed point. The RoPE metrics file has an empty `validation_history` and only a final validation result. No unrecorded intermediate RoPE validation curve is plotted or inferred. Curve completeness and checkpoint evaluability are separate issues.
+
+## 5. Ablations: Benefits and Limitations
+
+| Comparison | Matched conditions | Validation BPB change | Supported observation |
+|---|---|---|---|
+| GELU → SwiGLU | Width 128, 4 layers, 1200 steps, no dropout | 2.07109 → 2.00788 | Gating helps in the small, short-budget setting |
+| SwiGLU → GELU | Width 192, 6 layers, 6000 steps, dropout 0.05 | 1.63767 → 1.60688 | GELU wins in the larger setting |
+| Remove dropout | Width 192, 6 layers, 6000 steps, SwiGLU | 1.63767 → 1.66182 | Dropout helps in this setting |
+| 4 → 6 layers | Width 192, 6000 steps, SwiGLU + dropout | 1.66915 → 1.63767 | Depth improves validation at additional cost |
+
+
 
 **Initial comparisons (E1–E4).** With 1200 updates, SwiGLU lowers validation BPB by 0.06320 relative to GELU. Both standalone dropout settings worsen the baseline. SwiGLU therefore helps in this small-model, short-budget setting, while dropout does not show a benefit. A common seed does not make parameter initialization identical across architectures.
 
@@ -90,10 +147,19 @@ python evaluate.py --checkpoint runs/rope-width256-depth6-6000/checkpoint.pt --d
 
 The training command restates the main logged settings, not a guarantee of bitwise reproducibility across devices. Provide immutable code and matching downloadable weights, with paths and configuration consistent with the score.
 
-## 8. Conclusions, Personal Work, and AI Assistance
+## 8. Discussion and Conclusions
 
 The principal finding is that improvements depend on scale and training conditions. The small-model SwiGLU benefit does not persist in the larger comparison, and dropout's effect also changes. More training and capacity improve validation quality at additional cost. The RoPE combination achieves the best recorded validation score and 1.54400 full-test BPB, but its independent positional-encoding benefit remains unresolved. Priorities for further evidence are a matched RoPE control, multiple seeds, and full-test resource verification.
+
+## 9. Personal Work and AI Assistance
 
 **Personal contribution.** I read and progressively worked through the supplied GPT and training code, edited student.py and configuration files with AI guidance, executed multiple training experiments, inspected logs, and compared settings. I proposed exploring additional blocks, discussed integrating RoPE through GPT inheritance, and carried out GELU, SwiGLU, and dropout comparisons. I participated in choosing and implementing the experimental progression rather than simply submitting a ready-made result. My analysis must follow the measurements, including accepting that GELU outperforms SwiGLU in the larger setting and distinguishing validation scores, test scores, and resource costs.
 
 **AI assistance.** OpenAI Codex/ChatGPT explained concepts and assignment rules, suggested experiments, supplied some implementation examples, diagnosed errors, integrated the provided RoPE example into student.py, ran some interface and resource checks and one earlier test evaluation, and aggregated logs and drafted the bilingual reports. The baseline is course-provided and RoPE also draws on the supplied example file. This assistance does not replace my experimental work, understanding, or responsibility for the final submission. I must review the report against my actual work and retain the substantive AI and code-reuse disclosure in the README.
+
+
+## 10. Data and Report Organization
+
+The project uses the supplied WikiText-2 data, derived from Wikipedia, and a tokenizer fitted only to the training split. Redistribution should retain the CC BY-SA 3.0 and GNU Free Documentation License notices in the course README. No separate bibliography is included.
+
+This revision uses the presentation hierarchy of the vectorBH6/HKU_DASE7506_MP1 report as an organizational reference: architecture configuration, headline results, training dynamics, ablations, and reproduction. Its model components, experimental numbers, and personal-contribution claims are not adopted. All numerical results come from this project's logs. Organizational reference: https://github.com/vectorBH6/HKU_DASE7506_MP1/blob/master/report/report.md
